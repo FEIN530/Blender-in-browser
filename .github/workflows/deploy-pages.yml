@@ -1,0 +1,49 @@
+name: Build and Deploy Lightweight Blender-WASM
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build python3 git pkg-config
+
+      - name: Build lightweight Blender WASM and web demo
+        run: |
+          make all
+          make blender-web
+          cd demo && npm install && npm run build
+
+      - name: Inject coi-serviceworker for GitHub Pages
+        run: |
+          curl -sL https://unpkg.com/coi-serviceworker@0.1.7/coi-serviceworker.min.js -o demo/dist/coi-serviceworker.js
+          sed -i 's|<head>|<head><script src="coi-serviceworker.js"></script>|' demo/dist/index.html
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: demo/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
