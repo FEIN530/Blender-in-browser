@@ -22,45 +22,22 @@ jobs:
 
       - name: Download and place precompiled Blender WASM files
         run: |
-          python3 - << 'EOF'
-          import json, os, shutil, tarfile, urllib.request
-
-          req = urllib.request.Request(
-              "https://api.github.com/repos/HeyPuter/blender-wasm/releases",
-              headers={"User-Agent": "github-actions"}
-          )
-          releases = json.loads(urllib.request.urlopen(req).read().decode())
-
-          tar_url = None
-          for rel in releases:
-              for asset in rel.get("assets", []):
-                  if asset["name"].endswith((".tar.gz", ".tgz")):
-                      tar_url = asset["browser_download_url"]
-                      print("Downloading:", asset["name"], tar_url)
-                      break
-              if tar_url:
-                  break
-
-          if not tar_url:
-              raise RuntimeError("No .tar.gz release asset found")
-
-          urllib.request.urlretrieve(tar_url, "/tmp/blender_release.tar.gz")
-          os.makedirs("/tmp/extracted", exist_ok=True)
-          with tarfile.open("/tmp/blender_release.tar.gz", "r:gz") as tf:
-              tf.extractall("/tmp/extracted")
-
-          os.makedirs("demo/dist/blender", exist_ok=True)
-          for root, _, files in os.walk("/tmp/extracted"):
-              for f in files:
-                  src = os.path.join(root, f)
-                  shutil.copy2(src, os.path.join("demo/dist", f))
-                  shutil.copy2(src, os.path.join("demo/dist/blender", f))
-                  print("Placed:", f)
-          EOF
+          curl -fL "https://github.com/HeyPuter/blender-wasm/releases/download/1.0.0/blender8-1.tar.gz" -o /tmp/blender_release.tar.gz || \
+          curl -fL "https://github.com/HeyPuter/blender-wasm/releases/download/1.0.0/blender6.tar.gz" -o /tmp/blender_release.tar.gz
+          mkdir -p /tmp/extracted demo/dist/blender
+          tar -xzf /tmp/blender_release.tar.gz -C /tmp/extracted
+          find /tmp/extracted -type f -exec sh -c '
+            for f do
+              name=$(basename "$f")
+              cp "$f" "demo/dist/$name"
+              cp "$f" "demo/dist/blender/$name"
+              echo "Placed: $name"
+            done
+          ' sh {} +
 
       - name: Inject coi-serviceworker and on-screen status log
         run: |
-          curl -sL https://unpkg.com/coi-serviceworker@0.1.7/coi-serviceworker.min.js -o demo/dist/coi-serviceworker.js
+          curl -fL https://unpkg.com/coi-serviceworker@0.1.7/coi-serviceworker.min.js -o demo/dist/coi-serviceworker.js
           python3 - << 'EOF'
           coi = '<script src="./coi-serviceworker.js"></script>\n'
           overlay = """
