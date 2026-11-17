@@ -59,6 +59,7 @@ jobs:
               prefs.edit.undo_steps = 10
               prefs.edit.undo_memory_limit = 256
               prefs.view.show_splash = False
+              prefs.filepaths.save_version = 0
               for attr, val in [("gl_texture_limit", "LIMIT_1024"), ("viewport_aa", "OFF")]:
                   if hasattr(prefs.system, attr):
                       try:
@@ -106,7 +107,7 @@ jobs:
               subprocess.run(["zstd", "-19", "/tmp/assets.tar", "-o", "demo/dist/assets.tar.zst"], check=True)
           EOF
 
-      - name: Inject coi-serviceworker and Chromebook hardware caps
+      - name: Inject coi-serviceworker, hardware caps, and .blend save fix
         run: |
           curl -fL https://unpkg.com/coi-serviceworker@0.1.7/coi-serviceworker.min.js -o demo/dist/coi-serviceworker.js
           python3 - << 'EOF'
@@ -116,25 +117,27 @@ jobs:
               Object.defineProperty(navigator, "hardwareConcurrency", { get: () => 2 });
               Object.defineProperty(window, "devicePixelRatio", { get: () => 1 });
             } catch (e) {}
+
+            // Strip trailing '@' when Blender's safe-save triggers a .blend@ download
+            const fixBlendName = (v) => (typeof v === "string" && v.endsWith(".blend@")) ? v.slice(0, -1) : v;
+            const dlDesc = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, "download");
+            if (dlDesc && dlDesc.set) {
+              Object.defineProperty(HTMLAnchorElement.prototype, "download", {
+                set(v) { return dlDesc.set.call(this, fixBlendName(v)); },
+                get() { return dlDesc.get.call(this); }
+              });
+            }
+            const origSetAttr = Element.prototype.setAttribute;
+            Element.prototype.setAttribute = function(name, v) {
+              if (this.tagName === "A" && name.toLowerCase() === "download") v = fixBlendName(v);
+              return origSetAttr.call(this, name, v);
+            };
+            if (window.showSaveFilePicker) {
+              const origPicker = window.showSaveFilePicker;
+              window.showSaveFilePicker = function(opts = {}) {
+                if (opts && opts.suggestedName) opts = { ...opts, suggestedName: fixBlendName(opts.suggestedName) };
+                return origPicker.call(this, opts);
+              };
+            }
           </script>
           """
-          html = open("demo/dist/index.html").read()
-          html = html.replace("<head>", "<head>\n" + head_inject, 1)
-          open("demo/dist/index.html", "w").write(html)
-          EOF
-
-      - name: Upload GitHub Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: demo/dist
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
