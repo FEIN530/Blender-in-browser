@@ -1,4 +1,4 @@
-name: Build and Deploy Lightweight Blender-WASM
+name: Fast Deploy Prebuilt Blender-WASM
 
 on:
   push:
@@ -16,16 +16,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Build demo frontend
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build python3 git pkg-config
-
-      - name: Build lightweight Blender WASM and web demo
-        run: |
-          make all
-          make blender-web
           cd demo && npm install && npm run build
+
+      - name: Download precompiled Blender WASM engine
+        run: |
+          mkdir -p demo/dist/blender
+          curl -sL https://github.com/HeyPuter/blender-wasm/releases/download/1.0.0/blender6.tar.gz -o /tmp/blender.tar.gz
+          tar -xzf /tmp/blender.tar.gz -C demo/dist/blender
 
       - name: Inject coi-serviceworker for GitHub Pages
         run: |
