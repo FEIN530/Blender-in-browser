@@ -1,4 +1,4 @@
-name: Deploy Blender-WASM to GitHub Pages
+name: Deploy Level-2 Optimized Blender-WASM
 
 on:
   push:
@@ -16,52 +16,110 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install zstd
+        run: sudo apt-get update && sudo apt-get install -y zstd
+
       - name: Build demo frontend with relative paths
         run: |
           cd demo && npm install && npm run build -- --base=./
 
-      - name: Download and place precompiled Blender WASM files
+      - name: Download precompiled Blender WASM files
         run: |
           curl -fL "https://github.com/HeyPuter/blender-wasm/releases/download/1.0.0/blender8-1.tar.gz" -o /tmp/blender_release.tar.gz || \
           curl -fL "https://github.com/HeyPuter/blender-wasm/releases/download/1.0.0/blender6.tar.gz" -o /tmp/blender_release.tar.gz
-          mkdir -p /tmp/extracted demo/dist/blender
+          mkdir -p /tmp/extracted
           tar -xzf /tmp/blender_release.tar.gz -C /tmp/extracted
-          find /tmp/extracted -type f -exec sh -c '
-            for f do
-              name=$(basename "$f")
-              cp "$f" "demo/dist/$name"
-              cp "$f" "demo/dist/blender/$name"
-              echo "Placed: $name"
-            done
-          ' sh {} +
+          find /tmp/extracted -type f -exec cp {} demo/dist/ \;
 
-      - name: Inject coi-serviceworker and on-screen status log
+      - name: Strip heavy assets and bake low-RAM Blender startup preferences
+        run: |
+          python3 - << 'EOF'
+          import glob, os, shutil, subprocess
+
+          if os.path.exists("demo/dist/assets.tar.zst"):
+              os.makedirs("/tmp/assets_dir", exist_ok=True)
+              subprocess.run(["zstd", "-d", "demo/dist/assets.tar.zst", "-o", "/tmp/assets.tar"], check=True)
+              subprocess.run(["tar", "-xf", "/tmp/assets.tar", "-C", "/tmp/assets_dir"], check=True)
+
+              # 1. Remove heavy optional datafiles (HDRI studio lights & sculpt brushes)
+              for root, dirs, _ in os.walk("/tmp/assets_dir"):
+                  for d in list(dirs):
+                      if d in ("studiolights", "brush_assets"):
+                          target = os.path.join(root, d)
+                          print("Stripping:", target)
+                          shutil.rmtree(target)
+                          dirs.remove(d)
+
+              # 2. Inject automatic low-RAM startup script into Blender's scripts/startup/
+              startup_code = """import bpy
+          from bpy.app.handlers import persistent
+
+          def apply_low_ram_prefs():
+              prefs = bpy.context.preferences
+              prefs.edit.undo_steps = 10
+              prefs.edit.undo_memory_limit = 256
+              prefs.view.show_splash = False
+              for attr, val in [("gl_texture_limit", "LIMIT_1024"), ("viewport_aa", "OFF")]:
+                  if hasattr(prefs.system, attr):
+                      try:
+                          setattr(prefs.system, attr, val)
+                      except Exception:
+                          pass
+
+          @persistent
+          def optimize_scene(_dummy=None):
+              apply_low_ram_prefs()
+              for scene in bpy.data.scenes:
+                  if hasattr(scene, "eevee"):
+                      for attr, val in [("taa_samples", 4), ("use_raytracing", False), ("shadow_pool_size", "64")]:
+                          if hasattr(scene.eevee, attr):
+                              try:
+                                  setattr(scene.eevee, attr, val)
+                              except Exception:
+                                  pass
+              for window in bpy.context.window_manager.windows:
+                  for area in window.screen.areas:
+                      if area.type == "VIEW_3D":
+                          for space in area.spaces:
+                              if space.type == "VIEW_3D":
+                                  space.shading.type = "SOLID"
+                                  space.shading.show_cavity = False
+                                  space.shading.show_shadows = False
+
+          def register():
+              apply_low_ram_prefs()
+              if optimize_scene not in bpy.app.handlers.load_post:
+                  bpy.app.handlers.load_post.append(optimize_scene)
+              bpy.app.timers.register(optimize_scene, first_interval=0.2)
+          """
+
+              for sdir in glob.glob("/tmp/assets_dir/**/scripts/startup", recursive=True):
+                  script_path = os.path.join(sdir, "chromebook_low_ram.py")
+                  with open(script_path, "w") as f:
+                      f.write(startup_code)
+                  print("Injected low-RAM startup script:", script_path)
+
+              # 3. Repack assets.tar.zst at maximum compression
+              os.remove("/tmp/assets.tar")
+              os.remove("demo/dist/assets.tar.zst")
+              subprocess.run(["tar", "-cf", "/tmp/assets.tar", "-C", "/tmp/assets_dir", "."], check=True)
+              subprocess.run(["zstd", "-19", "/tmp/assets.tar", "-o", "demo/dist/assets.tar.zst"], check=True)
+          EOF
+
+      - name: Inject coi-serviceworker and Chromebook hardware caps
         run: |
           curl -fL https://unpkg.com/coi-serviceworker@0.1.7/coi-serviceworker.min.js -o demo/dist/coi-serviceworker.js
           python3 - << 'EOF'
-          coi = '<script src="./coi-serviceworker.js"></script>\n'
-          overlay = """
-          <pre id="wasm-debug" style="position:fixed;bottom:10px;left:10px;right:10px;max-height:30vh;overflow:auto;background:#111;color:#0f0;padding:10px;font-size:12px;z-index:99999;border-radius:6px;margin:0;"></pre>
+          head_inject = """<script src="./coi-serviceworker.js"></script>
           <script>
-            (function() {
-              const box = document.getElementById("wasm-debug");
-              const log = (m) => { box.textContent += m + "\\n"; };
-              log("crossOriginIsolated: " + window.crossOriginIsolated);
-              log("WebGPU (navigator.gpu): " + !!navigator.gpu);
-              window.addEventListener("error", (e) => log("ERROR: " + (e.message || e.target?.src || e.target?.href)), true);
-              window.addEventListener("unhandledrejection", (e) => log("PROMISE: " + e.reason));
-              const origFetch = window.fetch;
-              window.fetch = async (...args) => {
-                const res = await origFetch(...args);
-                if (!res.ok) log("FETCH " + res.status + ": " + res.url);
-                return res;
-              };
-            })();
+            try {
+              Object.defineProperty(navigator, "hardwareConcurrency", { get: () => 2 });
+              Object.defineProperty(window, "devicePixelRatio", { get: () => 1 });
+            } catch (e) {}
           </script>
           """
           html = open("demo/dist/index.html").read()
-          html = html.replace("<head>", "<head>\n" + coi, 1)
-          html = html.replace("</body>", overlay + "\n</body>", 1)
+          html = html.replace("<head>", "<head>\n" + head_inject, 1)
           open("demo/dist/index.html", "w").write(html)
           EOF
 
