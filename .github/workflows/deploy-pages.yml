@@ -1,4 +1,4 @@
-name: Fast Deploy Prebuilt Blender-WASM
+name: Deploy Blender-WASM to GitHub Pages
 
 on:
   push:
@@ -16,42 +16,77 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build demo frontend
+      - name: Build demo frontend with relative paths
         run: |
-          cd demo && npm install && npm run build
+          cd demo && npm install && npm run build -- --base=./
 
-      - name: Download precompiled Blender WASM engine
+      - name: Download and place precompiled Blender WASM files
         run: |
-          mkdir -p demo/dist/blender
-          curl -sL https://github.com/HeyPuter/blender-wasm/releases/download/1.0.0/blender6.tar.gz -o /tmp/blender.tar.gz
-          tar -xzf /tmp/blender.tar.gz -C demo/dist/blender
+          python3 - << 'EOF'
+          import json, os, shutil, tarfile, urllib.request
 
-      - name: Inject coi-serviceworker and on-screen error log
+          req = urllib.request.Request(
+              "https://api.github.com/repos/HeyPuter/blender-wasm/releases",
+              headers={"User-Agent": "github-actions"}
+          )
+          releases = json.loads(urllib.request.urlopen(req).read().decode())
+
+          tar_url = None
+          for rel in releases:
+              for asset in rel.get("assets", []):
+                  if asset["name"].endswith((".tar.gz", ".tgz")):
+                      tar_url = asset["browser_download_url"]
+                      print("Downloading:", asset["name"], tar_url)
+                      break
+              if tar_url:
+                  break
+
+          if not tar_url:
+              raise RuntimeError("No .tar.gz release asset found")
+
+          urllib.request.urlretrieve(tar_url, "/tmp/blender_release.tar.gz")
+          os.makedirs("/tmp/extracted", exist_ok=True)
+          with tarfile.open("/tmp/blender_release.tar.gz", "r:gz") as tf:
+              tf.extractall("/tmp/extracted")
+
+          os.makedirs("demo/dist/blender", exist_ok=True)
+          for root, _, files in os.walk("/tmp/extracted"):
+              for f in files:
+                  src = os.path.join(root, f)
+                  shutil.copy2(src, os.path.join("demo/dist", f))
+                  shutil.copy2(src, os.path.join("demo/dist/blender", f))
+                  print("Placed:", f)
+          EOF
+
+      - name: Inject coi-serviceworker and on-screen status log
         run: |
           curl -sL https://unpkg.com/coi-serviceworker@0.1.7/coi-serviceworker.min.js -o demo/dist/coi-serviceworker.js
-          python3 -c '
-          overlay = """<script src="coi-serviceworker.js"></script>
+          python3 - << 'EOF'
+          coi = '<script src="./coi-serviceworker.js"></script>\n'
+          overlay = """
+          <pre id="wasm-debug" style="position:fixed;bottom:10px;left:10px;right:10px;max-height:30vh;overflow:auto;background:#111;color:#0f0;padding:10px;font-size:12px;z-index:99999;border-radius:6px;margin:0;"></pre>
           <script>
-            window.addEventListener("DOMContentLoaded", () => {
-              const box = document.createElement("pre");
-              box.style.cssText = "position:fixed;bottom:10px;left:10px;right:10px;max-height:35vh;overflow:auto;background:#111;color:#0f0;padding:10px;font-size:12px;z-index:99999;border-radius:6px;";
+            (function() {
+              const box = document.getElementById("wasm-debug");
               const log = (m) => { box.textContent += m + "\\n"; };
-              document.body.appendChild(box);
               log("crossOriginIsolated: " + window.crossOriginIsolated);
               log("WebGPU (navigator.gpu): " + !!navigator.gpu);
               window.addEventListener("error", (e) => log("ERROR: " + (e.message || e.target?.src || e.target?.href)), true);
-              window.addEventListener("unhandledrejection", (e) => log("PROMISE ERROR: " + e.reason));
+              window.addEventListener("unhandledrejection", (e) => log("PROMISE: " + e.reason));
               const origFetch = window.fetch;
               window.fetch = async (...args) => {
                 const res = await origFetch(...args);
                 if (!res.ok) log("FETCH " + res.status + ": " + res.url);
                 return res;
               };
-            });
-          </script>"""
+            })();
+          </script>
+          """
           html = open("demo/dist/index.html").read()
-          open("demo/dist/index.html", "w").write(html.replace("<head>", "<head>\n" + overlay, 1))
-          '
+          html = html.replace("<head>", "<head>\n" + coi, 1)
+          html = html.replace("</body>", overlay + "\n</body>", 1)
+          open("demo/dist/index.html", "w").write(html)
+          EOF
 
       - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v3
